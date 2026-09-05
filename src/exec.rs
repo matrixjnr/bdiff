@@ -46,6 +46,12 @@ impl Runner {
         for p in &cfg.normalise.patterns {
             normalisers.push(Regex::new(p).map_err(|e| format!("normalise pattern {p:?}: {e}"))?);
         }
+        let trace = if trace && being_traced() {
+            eprintln!("  warn: already under a tracer (nested ptrace unsupported); syscall tracing disabled");
+            false
+        } else {
+            trace
+        };
         Ok(Runner { root, cfg, normalisers, trace })
     }
 
@@ -145,6 +151,19 @@ impl Runner {
         }
         s
     }
+}
+
+/// A process can have only one tracer. If something is already tracing us,
+/// strace on our children would fail and yield a wrong-but-plausible report.
+fn being_traced() -> bool {
+    std::fs::read_to_string("/proc/self/status")
+        .map(|t| {
+            t.lines()
+                .find_map(|l| l.strip_prefix("TracerPid:"))
+                .map(|v| v.trim() != "0")
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
 }
 
 fn have_strace() -> bool {

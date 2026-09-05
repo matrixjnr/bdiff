@@ -23,3 +23,7 @@ args = ["bogus"]
 [[case]]
 name = "self: missing config"
 args = ["dirs", "fixtures", "fixtures", "--no-trace"]
+
+[[case]]
+name = "self: parse-amount fixture, traced"
+args = ["dirs", "fixtures/parse-amount/old", "fixtures/parse-amount/new"]
