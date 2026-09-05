@@ -1,0 +1,25 @@
+# bdiff self-hosting: the corpus is bdiff running on its own fixtures.
+[build]
+cmd = "cargo build -q"
+
+[run]
+cmd = "target/debug/bdiff"
+
+[normalise]
+patterns = ['bdiff-wt-[0-9a-f]+-\d+']
+
+[[case]]
+name = "self: parse-amount fixture, text"
+args = ["dirs", "fixtures/parse-amount/old", "fixtures/parse-amount/new", "--no-trace"]
+
+[[case]]
+name = "self: parse-amount fixture, json"
+args = ["dirs", "fixtures/parse-amount/old", "fixtures/parse-amount/new", "--no-trace", "--json"]
+
+[[case]]
+name = "self: usage on bad args"
+args = ["bogus"]
+
+[[case]]
+name = "self: missing config"
+args = ["dirs", "fixtures", "fixtures", "--no-trace"]

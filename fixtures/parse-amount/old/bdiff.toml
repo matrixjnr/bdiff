@@ -1,0 +1,26 @@
+[run]
+cmd = "python3 parse_amount.py"
+
+[[case]]
+name = "plain"
+args = ["100"]
+
+[[case]]
+name = "decimal"
+args = ["12.50"]
+
+[[case]]
+name = "thousands separator"
+args = ["1,000.50"]
+
+[[case]]
+name = "empty string"
+args = [""]
+
+[[case]]
+name = "scientific"
+args = ["1e3"]
+
+[[case]]
+name = "negative"
+args = ["-5"]
