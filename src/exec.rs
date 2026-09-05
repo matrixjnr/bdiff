@@ -241,12 +241,20 @@ fn parse_strace(path: &Path, root: &Path) -> SyscallSummary {
         let Some(c) = line_re.captures(line) else { continue };
         let name = c[1].to_string();
         let args = &c[2];
+        let ret = &c[3];
         *s.counts.entry(name.clone()).or_insert(0) += 1;
+        // Failed syscalls are not behavior (PATH probes, ENOENT on optional files).
+        if ret.starts_with('-') {
+            continue;
+        }
         match name.as_str() {
             "openat" | "open" | "creat" => {
                 if flags_re.is_match(args) || name == "creat" {
                     if let Some(p) = path_re.captures(args) {
-                        s.writes.insert(rel(&p[1], &root_s));
+                        let path = rel(&p[1], &root_s);
+                        if !path.contains("bdiff-trace-") {
+                            s.writes.insert(path);
+                        }
                     }
                 }
             }
