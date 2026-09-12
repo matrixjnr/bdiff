@@ -32,7 +32,7 @@ pub struct SyscallSummary {
     pub counts: BTreeMap<String, u64>,
     pub writes: BTreeSet<String>,
     pub connects: BTreeSet<String>,
-    pub execs: Vec<String>,
+    pub execs: BTreeSet<String>,
 }
 
 impl Observation {
@@ -274,14 +274,29 @@ fn parse_strace(path: &Path, root: &Path) -> SyscallSummary {
     let Ok(text) = std::fs::read_to_string(path) else { return s };
     let root_s = root.to_string_lossy();
     // `PID  name(args) = ret` ; with -s 0 strings are elided but paths are kept.
+    // Under -f, a call interrupted by another process's event is split into
+    // `PID name(args <unfinished ...>` and `PID <... name resumed>...) = ret`.
     let line_re = Regex::new(r#"^\d+\s+(\w+)\((.*)\)\s*=\s*(-?\d+|\?)"#).unwrap();
+    let unfinished_re = Regex::new(r#"^(\d+)\s+(\w+)\((.*) <unfinished \.\.\.>$"#).unwrap();
+    let resumed_re = Regex::new(r#"^(\d+)\s+<\.\.\. (\w+) resumed>.*=\s*(-?\d+|\?)"#).unwrap();
     let path_re = Regex::new(r#""([^"]*)""#).unwrap();
     let flags_re = Regex::new(r#"O_(WRONLY|RDWR|CREAT|TRUNC|APPEND)"#).unwrap();
+    let mut pending: BTreeMap<String, (String, String)> = BTreeMap::new(); // pid -> (name, args)
     for line in text.lines() {
-        let Some(c) = line_re.captures(line) else { continue };
-        let name = c[1].to_string();
-        let args = &c[2];
-        let ret = &c[3];
+        let (name, args, ret): (String, String, String) = if let Some(c) = line_re.captures(line) {
+            (c[1].to_string(), c[2].to_string(), c[3].to_string())
+        } else if let Some(c) = unfinished_re.captures(line) {
+            pending.insert(c[1].to_string(), (c[2].to_string(), c[3].to_string()));
+            continue;
+        } else if let Some(c) = resumed_re.captures(line) {
+            match pending.remove(&c[1]) {
+                Some((n, a)) if n == &c[2] => (n, a, c[3].to_string()),
+                _ => continue,
+            }
+        } else {
+            continue;
+        };
+        let args = args.as_str();
         *s.counts.entry(name.clone()).or_insert(0) += 1;
         // Failed syscalls are not behavior (PATH probes, ENOENT on optional files).
         if ret.starts_with('-') {
@@ -308,7 +323,7 @@ fn parse_strace(path: &Path, root: &Path) -> SyscallSummary {
             }
             "execve" => {
                 if let Some(p) = path_re.captures(args) {
-                    s.execs.push(rel(&p[1], &root_s));
+                    s.execs.insert(rel(&p[1], &root_s));
                 }
             }
             _ => {}
