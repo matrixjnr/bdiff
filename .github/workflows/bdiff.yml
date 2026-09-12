@@ -1,0 +1,27 @@
+name: bdiff
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  self-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install strace
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq strace
+
+      - name: Build
+        run: cargo build
+
+      - name: bdiff on own change
+        run: |
+          if git rev-parse -q --verify HEAD~1 >/dev/null; then
+            target/debug/bdiff rev HEAD~1 HEAD
+          else
+            echo "first commit; nothing to diff against"
+          fi
