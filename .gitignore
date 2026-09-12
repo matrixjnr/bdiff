@@ -1,2 +1,3 @@
 target/
 .bdiff/last-run.json
+bdiff.bundle
