@@ -207,6 +207,16 @@ impl Runner {
                 .collect();
         }
 
+        if let Some(cmd) = &self.reset_cmd {
+            let _ = Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .current_dir(&self.root)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+
         Ok(Observation {
             exit: out.status.code(),
             stdout: self.normalise(&String::from_utf8_lossy(&out.stdout)),

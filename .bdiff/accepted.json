@@ -1,6 +1,7 @@
 {
   "self: flaky fixture": "ee3384d57f043ddf",
   "self: parse-amount fixture, json": "b61f1a18a9ddd889",
+  "self: parse-amount fixture, text": "6539c1668335c703",
   "self: parse-amount fixture, traced": "cd541b862409a441",
   "self: usage on bad args": "f161172fe95458fe"
 }
