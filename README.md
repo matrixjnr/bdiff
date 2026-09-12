@@ -1,7 +1,6 @@
 # bdiff
 
 Behavioral diff. Reports what two revisions *do* differently, not what lines changed.
-See `bdiff-design.md` for the full design.
 
 Status: v0 — process boundary only (stdout, stderr, exit, filesystem writes,
 syscall summary via strace). No source understanding yet.
@@ -17,6 +16,3 @@ Known v0 limits
   result (bdiff itself) get mislabelled "regression?". Per-case expectations TBD.
 - strace is a placeholder tracer; nested tracing auto-degrades.
 - No scope stage: cannot report "changed code unreachable by corpus".
-
-Roadmap: v1 tree-sitter + LSP scope · v2 DAP capture + coverage-guided corpus
-· v3 traffic capture, own sandbox (replaces strace).
