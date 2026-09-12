@@ -130,8 +130,12 @@ fn run(o: &Opts, old_root: &Path, new_root: &Path) -> Result<bool, String> {
         return Err("no [[case]] entries in config; nothing to run".into());
     }
 
-    let old = Runner::new(old_root.to_path_buf(), cfg.clone(), o.trace)?;
-    let new = Runner::new(new_root.to_path_buf(), cfg.clone(), o.trace)?;
+    let mut old = Runner::new(old_root.to_path_buf(), cfg.clone(), o.trace)?;
+    let mut new = Runner::new(new_root.to_path_buf(), cfg.clone(), o.trace)?;
+    if o.mode == "rev" {
+        old.reset = Some(exec::Reset::Git);
+        new.reset = Some(exec::Reset::Git);
+    }
 
     eprintln!("old: {}", old_root.display());
     old.build()?;

@@ -63,6 +63,13 @@ pub struct Runner {
     pub cfg: Config,
     normalisers: Vec<Regex>,
     trace: bool,
+    /// If set, restore the tree to this state before every case run so
+    /// repeats and cases never see each other's side effects.
+    pub reset: Option<Reset>,
+}
+
+pub enum Reset {
+    Git,
 }
 
 impl Runner {
@@ -77,7 +84,32 @@ impl Runner {
         } else {
             trace
         };
-        Ok(Runner { root, cfg, normalisers, trace })
+        Ok(Runner { root, cfg, normalisers, trace, reset: None })
+    }
+
+    fn reset_tree(&self) -> Result<(), String> {
+        let Some(Reset::Git) = &self.reset else { return Ok(()) };
+        let mut clean = Command::new("git");
+        clean.args(["clean", "-fdxq"]);
+        for i in &self.cfg.fs.ignore {
+            clean.arg("-e").arg(i);
+        }
+        for (name, mut cmd) in [("clean", clean), ("checkout", {
+            let mut c = Command::new("git");
+            c.args(["checkout", "-q", "--", "."]);
+            c
+        })] {
+            let st = cmd
+                .current_dir(&self.root)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map_err(|e| format!("git {name}: {e}"))?;
+            if !st.success() {
+                return Err(format!("git {name} failed in {}", self.root.display()));
+            }
+        }
+        Ok(())
     }
 
     pub fn build(&self) -> Result<(), String> {
@@ -109,6 +141,7 @@ impl Runner {
             return Err("empty command".into());
         }
         let cwd = self.root.join(&self.cfg.run.cwd);
+        self.reset_tree()?;
 
         let trace_file = if self.trace && have_strace() {
             Some(std::env::temp_dir().join(format!("bdiff-trace-{}", std::process::id())))
