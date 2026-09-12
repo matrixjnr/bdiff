@@ -1,0 +1,9 @@
+[[case]]
+name = "random"
+cmd = "python3 -c"
+args = ["import random; print(random.random())"]
+
+[[case]]
+name = "stable"
+cmd = "python3 -c"
+args = ["print('same')"]

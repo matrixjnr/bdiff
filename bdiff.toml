@@ -4,26 +4,37 @@ cmd = "cargo build -q"
 
 [run]
 cmd = "target/debug/bdiff"
+repeats = 2
 
 [normalise]
-patterns = ['bdiff-wt-[0-9a-f]+-\d+']
+patterns = ['bdiff-wt-[0-9a-f]+-\d+', '0\.\d{6,}']
 
 [[case]]
 name = "self: parse-amount fixture, text"
 args = ["dirs", "fixtures/parse-amount/old", "fixtures/parse-amount/new", "--no-trace"]
+expect_exit = [0, 1]
 
 [[case]]
 name = "self: parse-amount fixture, json"
 args = ["dirs", "fixtures/parse-amount/old", "fixtures/parse-amount/new", "--no-trace", "--json"]
-
-[[case]]
-name = "self: usage on bad args"
-args = ["bogus"]
-
-[[case]]
-name = "self: missing config"
-args = ["dirs", "fixtures", "fixtures", "--no-trace"]
+expect_exit = [0, 1]
 
 [[case]]
 name = "self: parse-amount fixture, traced"
 args = ["dirs", "fixtures/parse-amount/old", "fixtures/parse-amount/new"]
+expect_exit = [0, 1]
+
+[[case]]
+name = "self: flaky fixture"
+args = ["dirs", "fixtures/flaky/old", "fixtures/flaky/new", "--no-trace"]
+expect_exit = [0, 1]
+
+[[case]]
+name = "self: usage on bad args"
+args = ["bogus"]
+expect_exit = [2]
+
+[[case]]
+name = "self: missing config"
+args = ["dirs", "fixtures", "fixtures", "--no-trace"]
+expect_exit = [2]

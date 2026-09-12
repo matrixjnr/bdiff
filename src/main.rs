@@ -4,17 +4,24 @@ mod exec;
 
 use config::Config;
 use exec::Runner;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const USAGE: &str = "bdiff — behavioral diff (v0: process boundary only)
+const USAGE: &str = "bdiff: behavioral diff (v0: process boundary only)
 
 USAGE
-  bdiff rev  <old-rev> <new-rev> [--repo DIR] [--config FILE] [--json] [--no-trace]
-  bdiff dirs <old-dir> <new-dir>              [--config FILE] [--json] [--no-trace]
+  bdiff rev  <old-rev> <new-rev> [--repo DIR] [--config FILE] [--json] [--no-trace] [--repeats N]
+  bdiff dirs <old-dir> <new-dir>              [--config FILE] [--json] [--no-trace] [--repeats N]
+  bdiff accept [--case NAME]... [--repo DIR]
 
 Config (bdiff.toml) is read from the new revision root unless --config is given.
+`accept` records the new behavior of changed cases from the last run into
+.bdiff/accepted.json (commit it). Accepted deltas are reported but not counted.
 Exit code: 0 no behavior change, 1 changes found, 2 error.";
+
+const ACCEPTED: &str = ".bdiff/accepted.json";
+const LAST_RUN: &str = ".bdiff/last-run.json";
 
 struct Opts {
     mode: String,
@@ -24,6 +31,8 @@ struct Opts {
     config: Option<PathBuf>,
     json: bool,
     trace: bool,
+    repeats: Option<usize>,
+    only: Vec<String>,
 }
 
 fn parse_args() -> Result<Opts, String> {
@@ -32,8 +41,11 @@ fn parse_args() -> Result<Opts, String> {
     if mode == "-h" || mode == "--help" {
         return Err(USAGE.into());
     }
-    let a = args.next().ok_or(USAGE)?;
-    let b = args.next().ok_or(USAGE)?;
+    let (a, b) = if mode == "accept" {
+        (String::new(), String::new())
+    } else {
+        (args.next().ok_or(USAGE)?, args.next().ok_or(USAGE)?)
+    };
     let mut o = Opts {
         mode,
         a,
@@ -42,6 +54,8 @@ fn parse_args() -> Result<Opts, String> {
         config: None,
         json: false,
         trace: true,
+        repeats: None,
+        only: Vec::new(),
     };
     while let Some(f) = args.next() {
         match f.as_str() {
@@ -49,6 +63,15 @@ fn parse_args() -> Result<Opts, String> {
             "--config" => o.config = Some(PathBuf::from(args.next().ok_or("--config needs a value")?)),
             "--json" => o.json = true,
             "--no-trace" => o.trace = false,
+            "--repeats" => {
+                o.repeats = Some(
+                    args.next()
+                        .ok_or("--repeats needs a value")?
+                        .parse()
+                        .map_err(|_| "--repeats must be an integer")?,
+                )
+            }
+            "--case" => o.only.push(args.next().ok_or("--case needs a value")?),
             _ => return Err(format!("unknown flag {f}\n{USAGE}")),
         }
     }
@@ -68,6 +91,9 @@ fn main() {
 
 fn real_main() -> Result<bool, String> {
     let o = parse_args()?;
+    if o.mode == "accept" {
+        return accept(&o).map(|_| false);
+    }
     let mut cleanup: Vec<PathBuf> = Vec::new();
 
     let (old_root, new_root) = match o.mode.as_str() {
@@ -112,22 +138,93 @@ fn run(o: &Opts, old_root: &Path, new_root: &Path) -> Result<bool, String> {
     eprintln!("new: {}", new_root.display());
     new.build()?;
 
+    // Accepted fingerprints travel with the code: read from the new revision.
+    let accepted: BTreeMap<String, String> = read_json(&new_root.join(ACCEPTED)).unwrap_or_default();
+    let repeats = o.repeats.unwrap_or(cfg.run.repeats).max(1);
+
     let mut findings = Vec::new();
     for case in &cfg.cases {
         eprintln!("  case: {}", case.name);
-        let a = old.run_case(case)?;
-        let b = new.run_case(case)?;
-        findings.push(diff::compare(&case.name, &a, &b));
+        let (a, old_flaky) = run_repeated(&old, case, repeats)?;
+        let (b, new_flaky) = run_repeated(&new, case, repeats)?;
+        let inp = diff::Inputs {
+            case: &case.name,
+            expect_exit: &case.expect_exit,
+            accepted: accepted.get(&case.name).map(String::as_str),
+            old_flaky,
+            new_flaky,
+        };
+        findings.push(diff::compare(&inp, &a, &b));
     }
 
     let report = diff::Report { old: o.a.clone(), new: o.b.clone(), findings };
-    let changed = report.findings.iter().any(|f| f.label != diff::Label::Unchanged);
+    let changed = report.changed() > 0;
+
+    // Persist last run so `bdiff accept` can promote fingerprints.
+    let last: BTreeMap<String, LastRunEntry> = report
+        .findings
+        .iter()
+        .map(|f| (f.case.clone(), LastRunEntry { label: f.label, fingerprint: f.fingerprint.clone() }))
+        .collect();
+    let _ = write_json(&o.repo.join(LAST_RUN), &last);
+
     if o.json {
         println!("{}", serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?);
     } else {
         report.print_text();
     }
     Ok(changed)
+}
+
+/// Run a case `n` times; flaky if the revision disagrees with itself.
+fn run_repeated(r: &Runner, case: &config::Case, n: usize) -> Result<(exec::Observation, bool), String> {
+    let first = r.run_case(case)?;
+    for _ in 1..n {
+        let again = r.run_case(case)?;
+        if !again.behaves_like(&first) {
+            return Ok((first, true));
+        }
+    }
+    Ok((first, false))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LastRunEntry {
+    label: diff::Label,
+    fingerprint: String,
+}
+
+fn accept(o: &Opts) -> Result<(), String> {
+    let last: BTreeMap<String, LastRunEntry> = read_json(&o.repo.join(LAST_RUN))
+        .ok_or("no last run found; run bdiff first")?;
+    let mut accepted: BTreeMap<String, String> = read_json(&o.repo.join(ACCEPTED)).unwrap_or_default();
+    let mut n = 0;
+    for (case, e) in &last {
+        if !o.only.is_empty() && !o.only.contains(case) {
+            continue;
+        }
+        if e.label.is_change() {
+            accepted.insert(case.clone(), e.fingerprint.clone());
+            eprintln!("  accepted: {case}");
+            n += 1;
+        }
+    }
+    write_json(&o.repo.join(ACCEPTED), &accepted)?;
+    eprintln!("{n} accepted -> {}", o.repo.join(ACCEPTED).display());
+    Ok(())
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(p: &Path) -> Option<T> {
+    let text = std::fs::read_to_string(p).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn write_json<T: serde::Serialize>(p: &Path, v: &T) -> Result<(), String> {
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    let text = serde_json::to_string_pretty(v).map_err(|e| e.to_string())?;
+    std::fs::write(p, text + "\n").map_err(|e| format!("write {}: {e}", p.display()))
 }
 
 fn abs(p: &str) -> Result<PathBuf, String> {

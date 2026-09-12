@@ -21,13 +21,22 @@ pub struct Build {
     pub cmd: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Run {
     /// Program + fixed leading args, whitespace-split. Case args appended.
     pub cmd: Option<String>,
     /// Working directory relative to the revision root.
     #[serde(default = "dot")]
     pub cwd: String,
+    /// Times each case is run per revision. >1 enables flakiness detection.
+    #[serde(default = "two")]
+    pub repeats: usize,
+}
+
+impl Default for Run {
+    fn default() -> Self {
+        Run { cmd: None, cwd: dot(), repeats: two() }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -39,6 +48,9 @@ pub struct Case {
     pub stdin: String,
     /// Override run.cmd for this case.
     pub cmd: Option<String>,
+    /// Exit codes that count as success for this case. Default [0].
+    #[serde(default = "zero")]
+    pub expect_exit: Vec<i32>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -53,16 +65,29 @@ pub struct Fs {
     /// Top-level entries excluded from filesystem snapshots.
     #[serde(default = "default_ignore")]
     pub ignore: Vec<String>,
+    /// "auto": trace-derived write set when a tracer is available, else walk.
+    /// "walk": always hash the tree before/after. "trace": never walk.
+    #[serde(default = "auto")]
+    pub mode: String,
 }
 
 impl Default for Fs {
     fn default() -> Self {
-        Fs { ignore: default_ignore() }
+        Fs { ignore: default_ignore(), mode: auto() }
     }
 }
 
 fn dot() -> String {
     ".".into()
+}
+fn two() -> usize {
+    2
+}
+fn zero() -> Vec<i32> {
+    vec![0]
+}
+fn auto() -> String {
+    "auto".into()
 }
 
 fn default_ignore() -> Vec<String> {

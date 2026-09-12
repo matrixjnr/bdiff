@@ -1,19 +1,36 @@
 use crate::exec::Observation;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Label {
     Unchanged,
-    NewBehavior,        // old failed, new succeeds
+    NewBehavior,         // old failed, new succeeds
     RegressionCandidate, // old succeeded, new fails or differs
-    Changed,            // both failed, differently
+    Changed,             // both failed, differently
+    Accepted,            // differs, but new behavior was accepted via `bdiff accept`
+    Flaky,               // a revision disagreed with itself; excluded from comparison
+}
+
+impl Label {
+    pub fn is_change(self) -> bool {
+        matches!(self, Label::NewBehavior | Label::RegressionCandidate | Label::Changed)
+    }
+}
+
+pub struct Inputs<'a> {
+    pub case: &'a str,
+    pub expect_exit: &'a [i32],
+    pub accepted: Option<&'a str>,
+    pub old_flaky: bool,
+    pub new_flaky: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub struct Finding {
     pub case: String,
     pub label: Label,
+    pub fingerprint: String,
     pub exit: Option<(Option<i32>, Option<i32>)>,
     pub stdout: Vec<DiffLine>,
     pub stderr: Vec<DiffLine>,
@@ -27,24 +44,27 @@ pub struct DiffLine {
     pub text: String,
 }
 
-pub fn compare(case: &str, old: &Observation, new: &Observation) -> Finding {
-    let old_ok = old.exit == Some(0);
-    let new_ok = new.exit == Some(0);
+pub fn compare(inp: &Inputs, old: &Observation, new: &Observation) -> Finding {
+    let ok = |o: &Observation| o.exit.map(|c| inp.expect_exit.contains(&c)).unwrap_or(false);
+    let old_ok = ok(old);
+    let new_ok = ok(new);
     // Behavioral equality: what crosses the boundary. Syscall *counts* are
     // informational only (an extra import is not a behavior change).
-    let same = old.exit == new.exit
-        && old.stdout == new.stdout
-        && old.stderr == new.stderr
-        && old.fs == new.fs
-        && old.syscalls.writes == new.syscalls.writes
-        && old.syscalls.connects == new.syscalls.connects
-        && old.syscalls.execs == new.syscalls.execs;
+    let same = old.behaves_like(new);
+    let fingerprint = new.fingerprint();
 
-    let label = match (same, old_ok, new_ok) {
-        (true, _, _) => Label::Unchanged,
-        (false, false, true) => Label::NewBehavior,
-        (false, true, _) => Label::RegressionCandidate,
-        (false, false, false) => Label::Changed,
+    let label = if inp.old_flaky || inp.new_flaky {
+        Label::Flaky
+    } else if same {
+        Label::Unchanged
+    } else if inp.accepted == Some(fingerprint.as_str()) {
+        Label::Accepted
+    } else {
+        match (old_ok, new_ok) {
+            (false, true) => Label::NewBehavior,
+            (true, _) => Label::RegressionCandidate,
+            (false, false) => Label::Changed,
+        }
     };
 
     let mut fs = Vec::new();
@@ -73,6 +93,16 @@ pub fn compare(case: &str, old: &Observation, new: &Observation) -> Finding {
             fs.push(format!("+ deleted {p}"));
         }
     }
+    for p in &new.fs.written {
+        if !old.fs.written.contains(p) {
+            fs.push(format!("+ written {p}"));
+        }
+    }
+    for p in &old.fs.written {
+        if !new.fs.written.contains(p) {
+            fs.push(format!("- no longer written {p}"));
+        }
+    }
 
     let mut syscalls = Vec::new();
     if old.syscalls.available && new.syscalls.available {
@@ -97,8 +127,9 @@ pub fn compare(case: &str, old: &Observation, new: &Observation) -> Finding {
     }
 
     Finding {
-        case: case.to_string(),
+        case: inp.case.to_string(),
         label,
+        fingerprint,
         exit: if old.exit != new.exit { Some((old.exit, new.exit)) } else { None },
         stdout: if old.stdout != new.stdout { line_diff(&old.stdout, &new.stdout) } else { vec![] },
         stderr: if old.stderr != new.stderr { line_diff(&old.stderr, &new.stderr) } else { vec![] },
@@ -170,24 +201,43 @@ pub struct Report {
 }
 
 impl Report {
+    pub fn changed(&self) -> usize {
+        self.findings.iter().filter(|f| f.label.is_change()).count()
+    }
+
     pub fn print_text(&self) {
-        let changed: Vec<&Finding> = self.findings.iter().filter(|f| f.label != Label::Unchanged).collect();
+        let count = |l: Label| self.findings.iter().filter(|f| f.label == l).count();
         println!("bdiff {} -> {}", self.old, self.new);
-        println!(
-            "{} cases, {} unchanged, {} changed",
-            self.findings.len(),
-            self.findings.len() - changed.len(),
-            changed.len()
-        );
-        for f in changed {
+        let mut parts = vec![
+            format!("{} cases", self.findings.len()),
+            format!("{} unchanged", count(Label::Unchanged)),
+            format!("{} changed", self.changed()),
+        ];
+        if count(Label::Accepted) > 0 {
+            parts.push(format!("{} accepted", count(Label::Accepted)));
+        }
+        if count(Label::Flaky) > 0 {
+            parts.push(format!("{} flaky", count(Label::Flaky)));
+        }
+        println!("{}", parts.join(", "));
+        for f in self.findings.iter().filter(|f| f.label != Label::Unchanged) {
             println!();
             let tag = match f.label {
                 Label::NewBehavior => "+behavior",
                 Label::RegressionCandidate => "⚠ regression?",
                 Label::Changed => "~ changed",
+                Label::Accepted => "✓ accepted",
+                Label::Flaky => "? flaky",
                 Label::Unchanged => "",
             };
             println!("[{tag}] {}", f.case);
+            if f.label == Label::Flaky {
+                println!("  nondeterministic on its own; excluded from comparison");
+                continue;
+            }
+            if f.label == Label::Accepted {
+                continue;
+            }
             if let Some((o, n)) = f.exit {
                 println!("  exit: {} -> {}", fmt_exit(o), fmt_exit(n));
             }

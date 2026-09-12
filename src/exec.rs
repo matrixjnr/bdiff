@@ -22,6 +22,8 @@ pub struct FsDelta {
     pub created: Vec<String>,
     pub modified: Vec<String>,
     pub deleted: Vec<String>,
+    /// Trace mode: paths under $ROOT opened for writing / unlinked / renamed.
+    pub written: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq, Default)]
@@ -31,6 +33,29 @@ pub struct SyscallSummary {
     pub writes: BTreeSet<String>,
     pub connects: BTreeSet<String>,
     pub execs: Vec<String>,
+}
+
+impl Observation {
+    /// Stable hash of the behavioral subset (excludes syscall counts).
+    pub fn fingerprint(&self) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        let mut h = DefaultHasher::new();
+        self.exit.hash(&mut h);
+        self.stdout.hash(&mut h);
+        self.stderr.hash(&mut h);
+        self.fs.created.hash(&mut h);
+        self.fs.modified.hash(&mut h);
+        self.fs.deleted.hash(&mut h);
+        self.fs.written.hash(&mut h);
+        self.syscalls.writes.hash(&mut h);
+        self.syscalls.connects.hash(&mut h);
+        self.syscalls.execs.hash(&mut h);
+        format!("{:016x}", h.finish())
+    }
+
+    pub fn behaves_like(&self, o: &Observation) -> bool {
+        self.fingerprint() == o.fingerprint()
+    }
 }
 
 pub struct Runner {
@@ -85,13 +110,17 @@ impl Runner {
         }
         let cwd = self.root.join(&self.cfg.run.cwd);
 
-        let before = snapshot(&self.root, &self.cfg.fs.ignore);
-
         let trace_file = if self.trace && have_strace() {
             Some(std::env::temp_dir().join(format!("bdiff-trace-{}", std::process::id())))
         } else {
             None
         };
+        let walk = match self.cfg.fs.mode.as_str() {
+            "walk" => true,
+            "trace" => false,
+            _ => trace_file.is_none(),
+        };
+        let before = if walk { Some(snapshot(&self.root, &self.cfg.fs.ignore)) } else { None };
 
         let mut command = if let Some(tf) = &trace_file {
             let mut c = Command::new("strace");
@@ -122,8 +151,10 @@ impl Runner {
             .wait_with_output()
             .map_err(|e| format!("wait {:?}: {e}", argv))?;
 
-        let after = snapshot(&self.root, &self.cfg.fs.ignore);
-        let fs = fs_delta(&before, &after);
+        let mut fs = match &before {
+            Some(b) => fs_delta(b, &snapshot(&self.root, &self.cfg.fs.ignore)),
+            None => FsDelta::default(),
+        };
 
         let syscalls = match &trace_file {
             Some(tf) => {
@@ -133,6 +164,15 @@ impl Runner {
             }
             None => SyscallSummary::default(),
         };
+        if !walk {
+            fs.written = syscalls
+                .writes
+                .iter()
+                .filter(|w| w.starts_with("$ROOT/"))
+                .map(|w| w["$ROOT/".len()..].to_string())
+                .filter(|w| !self.cfg.fs.ignore.iter().any(|i| w == i || w.starts_with(&format!("{i}/"))))
+                .collect();
+        }
 
         Ok(Observation {
             exit: out.status.code(),
