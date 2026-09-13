@@ -14,7 +14,10 @@ pub enum Label {
 
 impl Label {
     pub fn is_change(self) -> bool {
-        matches!(self, Label::NewBehavior | Label::RegressionCandidate | Label::Changed)
+        matches!(
+            self,
+            Label::NewBehavior | Label::RegressionCandidate | Label::Changed
+        )
     }
 }
 
@@ -45,7 +48,11 @@ pub struct DiffLine {
 }
 
 pub fn compare(inp: &Inputs, old: &Observation, new: &Observation) -> Finding {
-    let ok = |o: &Observation| o.exit.map(|c| inp.expect_exit.contains(&c)).unwrap_or(false);
+    let ok = |o: &Observation| {
+        o.exit
+            .map(|c| inp.expect_exit.contains(&c))
+            .unwrap_or(false)
+    };
     let old_ok = ok(old);
     let new_ok = ok(new);
     // Behavioral equality: what crosses the boundary. Syscall *counts* are
@@ -130,9 +137,21 @@ pub fn compare(inp: &Inputs, old: &Observation, new: &Observation) -> Finding {
         case: inp.case.to_string(),
         label,
         fingerprint,
-        exit: if old.exit != new.exit { Some((old.exit, new.exit)) } else { None },
-        stdout: if old.stdout != new.stdout { line_diff(&old.stdout, &new.stdout) } else { vec![] },
-        stderr: if old.stderr != new.stderr { line_diff(&old.stderr, &new.stderr) } else { vec![] },
+        exit: if old.exit != new.exit {
+            Some((old.exit, new.exit))
+        } else {
+            None
+        },
+        stdout: if old.stdout != new.stdout {
+            line_diff(&old.stdout, &new.stdout)
+        } else {
+            vec![]
+        },
+        stderr: if old.stderr != new.stderr {
+            line_diff(&old.stderr, &new.stderr)
+        } else {
+            vec![]
+        },
         fs,
         syscalls,
     }
@@ -145,8 +164,17 @@ pub fn line_diff(a: &str, b: &str) -> Vec<DiffLine> {
     let (n, m) = (a.len(), b.len());
     if n * m > 4_000_000 {
         // too big for quadratic LCS; fall back to whole replacement
-        let mut v: Vec<DiffLine> = a.iter().map(|l| DiffLine { op: '-', text: l.to_string() }).collect();
-        v.extend(b.iter().map(|l| DiffLine { op: '+', text: l.to_string() }));
+        let mut v: Vec<DiffLine> = a
+            .iter()
+            .map(|l| DiffLine {
+                op: '-',
+                text: l.to_string(),
+            })
+            .collect();
+        v.extend(b.iter().map(|l| DiffLine {
+            op: '+',
+            text: l.to_string(),
+        }));
         return v;
     }
     let mut dp = vec![vec![0u32; m + 1]; n + 1];
@@ -163,23 +191,38 @@ pub fn line_diff(a: &str, b: &str) -> Vec<DiffLine> {
     let (mut i, mut j) = (0, 0);
     while i < n && j < m {
         if a[i] == b[j] {
-            full.push(DiffLine { op: ' ', text: a[i].to_string() });
+            full.push(DiffLine {
+                op: ' ',
+                text: a[i].to_string(),
+            });
             i += 1;
             j += 1;
         } else if dp[i + 1][j] >= dp[i][j + 1] {
-            full.push(DiffLine { op: '-', text: a[i].to_string() });
+            full.push(DiffLine {
+                op: '-',
+                text: a[i].to_string(),
+            });
             i += 1;
         } else {
-            full.push(DiffLine { op: '+', text: b[j].to_string() });
+            full.push(DiffLine {
+                op: '+',
+                text: b[j].to_string(),
+            });
             j += 1;
         }
     }
     while i < n {
-        full.push(DiffLine { op: '-', text: a[i].to_string() });
+        full.push(DiffLine {
+            op: '-',
+            text: a[i].to_string(),
+        });
         i += 1;
     }
     while j < m {
-        full.push(DiffLine { op: '+', text: b[j].to_string() });
+        full.push(DiffLine {
+            op: '+',
+            text: b[j].to_string(),
+        });
         j += 1;
     }
     // keep changed lines plus 1 line of context each side
@@ -190,7 +233,11 @@ pub fn line_diff(a: &str, b: &str) -> Vec<DiffLine> {
             (lo..=hi).any(|x| full[x].op != ' ')
         })
         .collect();
-    full.into_iter().zip(keep).filter(|(_, k)| *k).map(|(l, _)| l).collect()
+    full.into_iter()
+        .zip(keep)
+        .filter(|(_, k)| *k)
+        .map(|(l, _)| l)
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -265,4 +312,115 @@ impl Report {
 
 fn fmt_exit(e: Option<i32>) -> String {
     e.map(|c| c.to_string()).unwrap_or_else(|| "signal".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exec::{FsDelta, Observation, SyscallSummary};
+
+    fn obs(exit: i32, stdout: &str) -> Observation {
+        Observation {
+            exit: Some(exit),
+            stdout: stdout.into(),
+            stderr: String::new(),
+            fs: FsDelta::default(),
+            syscalls: SyscallSummary::default(),
+        }
+    }
+
+    fn inputs<'a>(expect_exit: &'a [i32], accepted: Option<&'a str>) -> Inputs<'a> {
+        Inputs {
+            case: "t",
+            expect_exit,
+            accepted,
+            old_flaky: false,
+            new_flaky: false,
+        }
+    }
+
+    #[test]
+    fn label_unchanged() {
+        let f = compare(&inputs(&[0], None), &obs(0, "x"), &obs(0, "x"));
+        assert_eq!(f.label, Label::Unchanged);
+        assert!(f.stdout.is_empty());
+        assert!(f.exit.is_none());
+    }
+
+    #[test]
+    fn label_new_behavior_when_old_failed() {
+        let f = compare(&inputs(&[0], None), &obs(1, "err"), &obs(0, "ok"));
+        assert_eq!(f.label, Label::NewBehavior);
+    }
+
+    #[test]
+    fn label_regression_when_old_ok() {
+        let f = compare(&inputs(&[0], None), &obs(0, "a"), &obs(0, "b"));
+        assert_eq!(f.label, Label::RegressionCandidate);
+        let f = compare(&inputs(&[0], None), &obs(0, "a"), &obs(1, "boom"));
+        assert_eq!(f.label, Label::RegressionCandidate);
+    }
+
+    #[test]
+    fn label_changed_when_both_fail_differently() {
+        let f = compare(&inputs(&[0], None), &obs(1, "a"), &obs(2, "b"));
+        assert_eq!(f.label, Label::Changed);
+    }
+
+    #[test]
+    fn label_respects_expect_exit() {
+        // exit 1 counts as success for this case, so a 0 -> 1 flip with the
+        // same output rules is still just a candidate, not new behavior
+        let f = compare(&inputs(&[0, 1], None), &obs(1, "a"), &obs(0, "b"));
+        assert_eq!(f.label, Label::RegressionCandidate);
+    }
+
+    #[test]
+    fn label_accepted_by_fingerprint() {
+        let new = obs(0, "b");
+        let fp = new.fingerprint();
+        let f = compare(&inputs(&[0], Some(&fp)), &obs(0, "a"), &new);
+        assert_eq!(f.label, Label::Accepted);
+        assert!(f.label == Label::Accepted && !f.label.is_change());
+    }
+
+    #[test]
+    fn label_flaky_wins() {
+        let mut inp = inputs(&[0], None);
+        inp.new_flaky = true;
+        let f = compare(&inp, &obs(0, "a"), &obs(0, "b"));
+        assert_eq!(f.label, Label::Flaky);
+    }
+
+    #[test]
+    fn finding_reports_exit_and_fs_deltas() {
+        let old = obs(0, "x");
+        let mut new = obs(3, "x");
+        new.fs = FsDelta {
+            created: vec!["f".into()],
+            ..FsDelta::default()
+        };
+        let f = compare(&inputs(&[0], None), &old, &new);
+        assert_eq!(f.exit, Some((Some(0), Some(3))));
+        assert_eq!(f.fs, vec!["+ created f"]);
+    }
+
+    #[test]
+    fn line_diff_keeps_changes_with_one_line_context() {
+        let d = line_diff("1\n2\n3\n4\n5", "1\n2\nX\n4\n5");
+        let rendered: Vec<(char, &str)> = d.iter().map(|l| (l.op, l.text.as_str())).collect();
+        assert_eq!(
+            rendered,
+            vec![(' ', "2"), ('-', "3"), ('+', "X"), (' ', "4")]
+        );
+    }
+
+    #[test]
+    fn line_diff_pure_insert_and_delete() {
+        assert!(line_diff("", "").is_empty());
+        let d = line_diff("", "a");
+        assert_eq!((d[0].op, d[0].text.as_str()), ('+', "a"));
+        let d = line_diff("a", "");
+        assert_eq!((d[0].op, d[0].text.as_str()), ('-', "a"));
+    }
 }

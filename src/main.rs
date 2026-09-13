@@ -35,8 +35,7 @@ struct Opts {
     only: Vec<String>,
 }
 
-fn parse_args() -> Result<Opts, String> {
-    let mut args = std::env::args().skip(1);
+fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Opts, String> {
     let mode = args.next().ok_or(USAGE)?;
     if mode == "-h" || mode == "--help" {
         return Err(USAGE.into());
@@ -60,7 +59,9 @@ fn parse_args() -> Result<Opts, String> {
     while let Some(f) = args.next() {
         match f.as_str() {
             "--repo" => o.repo = PathBuf::from(args.next().ok_or("--repo needs a value")?),
-            "--config" => o.config = Some(PathBuf::from(args.next().ok_or("--config needs a value")?)),
+            "--config" => {
+                o.config = Some(PathBuf::from(args.next().ok_or("--config needs a value")?))
+            }
             "--json" => o.json = true,
             "--no-trace" => o.trace = false,
             "--repeats" => {
@@ -80,7 +81,13 @@ fn parse_args() -> Result<Opts, String> {
 
 fn main() {
     let code = match real_main() {
-        Ok(changed) => if changed { 1 } else { 0 },
+        Ok(changed) => {
+            if changed {
+                1
+            } else {
+                0
+            }
+        }
         Err(e) => {
             eprintln!("{e}");
             2
@@ -90,7 +97,7 @@ fn main() {
 }
 
 fn real_main() -> Result<bool, String> {
-    let o = parse_args()?;
+    let o = parse_args(std::env::args().skip(1))?;
     if o.mode == "accept" {
         return accept(&o).map(|_| false);
     }
@@ -124,7 +131,10 @@ fn real_main() -> Result<bool, String> {
 }
 
 fn run(o: &Opts, old_root: &Path, new_root: &Path) -> Result<bool, String> {
-    let cfg_path = o.config.clone().unwrap_or_else(|| new_root.join("bdiff.toml"));
+    let cfg_path = o
+        .config
+        .clone()
+        .unwrap_or_else(|| new_root.join("bdiff.toml"));
     let cfg = Config::load(&cfg_path)?;
     if cfg.cases.is_empty() {
         return Err("no [[case]] entries in config; nothing to run".into());
@@ -143,7 +153,8 @@ fn run(o: &Opts, old_root: &Path, new_root: &Path) -> Result<bool, String> {
     new.build()?;
 
     // Accepted fingerprints travel with the code: read from the new revision.
-    let accepted: BTreeMap<String, String> = read_json(&new_root.join(ACCEPTED)).unwrap_or_default();
+    let accepted: BTreeMap<String, String> =
+        read_json(&new_root.join(ACCEPTED)).unwrap_or_default();
     let repeats = o.repeats.unwrap_or(cfg.run.repeats).max(1);
 
     let mut findings = Vec::new();
@@ -161,19 +172,34 @@ fn run(o: &Opts, old_root: &Path, new_root: &Path) -> Result<bool, String> {
         findings.push(diff::compare(&inp, &a, &b));
     }
 
-    let report = diff::Report { old: o.a.clone(), new: o.b.clone(), findings };
+    let report = diff::Report {
+        old: o.a.clone(),
+        new: o.b.clone(),
+        findings,
+    };
     let changed = report.changed() > 0;
 
     // Persist last run so `bdiff accept` can promote fingerprints.
     let last: BTreeMap<String, LastRunEntry> = report
         .findings
         .iter()
-        .map(|f| (f.case.clone(), LastRunEntry { label: f.label, fingerprint: f.fingerprint.clone() }))
+        .map(|f| {
+            (
+                f.case.clone(),
+                LastRunEntry {
+                    label: f.label,
+                    fingerprint: f.fingerprint.clone(),
+                },
+            )
+        })
         .collect();
     let _ = write_json(&o.repo.join(LAST_RUN), &last);
 
     if o.json {
-        println!("{}", serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+        );
     } else {
         report.print_text();
     }
@@ -181,7 +207,11 @@ fn run(o: &Opts, old_root: &Path, new_root: &Path) -> Result<bool, String> {
 }
 
 /// Run a case `n` times; flaky if the revision disagrees with itself.
-fn run_repeated(r: &Runner, case: &config::Case, n: usize) -> Result<(exec::Observation, bool), String> {
+fn run_repeated(
+    r: &Runner,
+    case: &config::Case,
+    n: usize,
+) -> Result<(exec::Observation, bool), String> {
     let first = r.run_case(case)?;
     for _ in 1..n {
         let again = r.run_case(case)?;
@@ -199,9 +229,10 @@ struct LastRunEntry {
 }
 
 fn accept(o: &Opts) -> Result<(), String> {
-    let last: BTreeMap<String, LastRunEntry> = read_json(&o.repo.join(LAST_RUN))
-        .ok_or("no last run found; run bdiff first")?;
-    let mut accepted: BTreeMap<String, String> = read_json(&o.repo.join(ACCEPTED)).unwrap_or_default();
+    let last: BTreeMap<String, LastRunEntry> =
+        read_json(&o.repo.join(LAST_RUN)).ok_or("no last run found; run bdiff first")?;
+    let mut accepted: BTreeMap<String, String> =
+        read_json(&o.repo.join(ACCEPTED)).unwrap_or_default();
     let mut n = 0;
     for (case, e) in &last {
         if !o.only.is_empty() && !o.only.contains(case) {
@@ -232,13 +263,35 @@ fn write_json<T: serde::Serialize>(p: &Path, v: &T) -> Result<(), String> {
 }
 
 fn abs(p: &str) -> Result<PathBuf, String> {
-    std::fs::canonicalize(p).map_err(|e| format!("{p}: {e}"))
+    std::fs::canonicalize(p)
+        .map(strip_verbatim)
+        .map_err(|e| format!("{p}: {e}"))
+}
+
+/// Windows canonicalize returns verbatim paths (\\?\C:\...). Children print
+/// plain paths, so keep the plain form or $ROOT normalisation never matches.
+fn strip_verbatim(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
+        _ => p,
+    }
 }
 
 fn worktree(repo: &Path, rev: &str) -> Result<PathBuf, String> {
     let sha = git(repo, &["rev-parse", "--short", rev])?;
     let dir = std::env::temp_dir().join(format!("bdiff-wt-{}-{}", sha.trim(), std::process::id()));
-    git(repo, &["worktree", "add", "--detach", "-q", &dir.to_string_lossy(), rev])?;
+    git(
+        repo,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            "-q",
+            &dir.to_string_lossy(),
+            rev,
+        ],
+    )?;
     Ok(dir)
 }
 
@@ -249,7 +302,66 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
         .output()
         .map_err(|e| format!("git: {e}"))?;
     if !out.status.success() {
-        return Err(format!("git {:?}: {}", args, String::from_utf8_lossy(&out.stderr)));
+        return Err(format!(
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Opts, String> {
+        parse_args(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn parses_modes_and_flags() {
+        let o = parse(&["rev", "HEAD~1", "HEAD", "--json", "--repeats", "3"]).unwrap();
+        assert_eq!(o.mode, "rev");
+        assert_eq!((o.a.as_str(), o.b.as_str()), ("HEAD~1", "HEAD"));
+        assert!(o.json);
+        assert!(o.trace);
+        assert_eq!(o.repeats, Some(3));
+
+        let o = parse(&["dirs", "a", "b", "--no-trace"]).unwrap();
+        assert!(!o.trace);
+        assert!(!o.json);
+    }
+
+    #[test]
+    fn accept_takes_case_filters() {
+        let o = parse(&["accept", "--case", "x", "--case", "y"]).unwrap();
+        assert_eq!(o.mode, "accept");
+        assert_eq!(o.only, vec!["x", "y"]);
+    }
+
+    #[test]
+    fn rejects_bad_input() {
+        assert!(parse(&[]).is_err());
+        assert!(parse(&["rev", "only-one"]).is_err());
+        assert!(parse(&["dirs", "a", "b", "--wat"]).is_err());
+        assert!(parse(&["dirs", "a", "b", "--repeats", "many"]).is_err());
+        assert!(parse(&["--help"]).is_err());
+    }
+
+    #[test]
+    fn strips_windows_verbatim_prefix() {
+        assert_eq!(
+            strip_verbatim(PathBuf::from(r"\\?\C:\repo")),
+            PathBuf::from(r"C:\repo")
+        );
+        assert_eq!(
+            strip_verbatim(PathBuf::from(r"\\?\UNC\srv\share")),
+            PathBuf::from(r"\\?\UNC\srv\share")
+        );
+        assert_eq!(
+            strip_verbatim(PathBuf::from("/plain/unix")),
+            PathBuf::from("/plain/unix")
+        );
+    }
 }

@@ -84,21 +84,32 @@ impl Runner {
         } else {
             trace
         };
-        Ok(Runner { root, cfg, normalisers, trace, reset: None })
+        Ok(Runner {
+            root,
+            cfg,
+            normalisers,
+            trace,
+            reset: None,
+        })
     }
 
     fn reset_tree(&self) -> Result<(), String> {
-        let Some(Reset::Git) = &self.reset else { return Ok(()) };
+        let Some(Reset::Git) = &self.reset else {
+            return Ok(());
+        };
         let mut clean = Command::new("git");
         clean.args(["clean", "-fdxq"]);
         for i in &self.cfg.fs.ignore {
             clean.arg("-e").arg(i);
         }
-        for (name, mut cmd) in [("clean", clean), ("checkout", {
-            let mut c = Command::new("git");
-            c.args(["checkout", "-q", "--", "."]);
-            c
-        })] {
+        for (name, mut cmd) in [
+            ("clean", clean),
+            ("checkout", {
+                let mut c = Command::new("git");
+                c.args(["checkout", "-q", "--", "."]);
+                c
+            }),
+        ] {
             let st = cmd
                 .current_dir(&self.root)
                 .stdout(Stdio::null())
@@ -113,11 +124,11 @@ impl Runner {
     }
 
     pub fn build(&self) -> Result<(), String> {
-        let Some(cmd) = &self.cfg.build.cmd else { return Ok(()) };
+        let Some(cmd) = &self.cfg.build.cmd else {
+            return Ok(());
+        };
         eprintln!("  build: {cmd}");
-        let st = Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
+        let st = shell(cmd)
             .current_dir(&self.root)
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -153,14 +164,26 @@ impl Runner {
             "trace" => false,
             _ => trace_file.is_none(),
         };
-        let before = if walk { Some(snapshot(&self.root, &self.cfg.fs.ignore)) } else { None };
+        let before = if walk {
+            Some(snapshot(&self.root, &self.cfg.fs.ignore))
+        } else {
+            None
+        };
 
         let mut command = if let Some(tf) = &trace_file {
             let mut c = Command::new("strace");
-            c.args(["-f", "-qq", "-e", "trace=%file,%network,%process", "-s", "0", "-o"])
-                .arg(tf)
-                .arg("--")
-                .args(&argv);
+            c.args([
+                "-f",
+                "-qq",
+                "-e",
+                "trace=%file,%network,%process",
+                "-s",
+                "0",
+                "-o",
+            ])
+            .arg(tf)
+            .arg("--")
+            .args(&argv);
             c
         } else {
             let mut c = Command::new(&argv[0]);
@@ -203,7 +226,14 @@ impl Runner {
                 .iter()
                 .filter(|w| w.starts_with("$ROOT/"))
                 .map(|w| w["$ROOT/".len()..].to_string())
-                .filter(|w| !self.cfg.fs.ignore.iter().any(|i| w == i || w.starts_with(&format!("{i}/"))))
+                .filter(|w| {
+                    !self
+                        .cfg
+                        .fs
+                        .ignore
+                        .iter()
+                        .any(|i| w == i || w.starts_with(&format!("{i}/")))
+                })
                 .collect();
         }
 
@@ -217,17 +247,38 @@ impl Runner {
     }
 
     fn normalise(&self, s: &str) -> String {
-        let root = self.root.to_string_lossy();
-        let mut s = s.replace(root.as_ref(), "$ROOT");
-        for re in &self.normalisers {
-            s = re.replace_all(&s, "<N>").into_owned();
-        }
-        s
+        normalise_text(s, &self.root.to_string_lossy(), &self.normalisers)
+    }
+}
+
+/// Replace the revision root with $ROOT, then apply configured patterns.
+fn normalise_text(s: &str, root: &str, patterns: &[Regex]) -> String {
+    let mut s = s.replace(root, "$ROOT");
+    for re in patterns {
+        s = re.replace_all(&s, "<N>").into_owned();
+    }
+    s
+}
+
+/// Run a config-supplied command line through the platform shell.
+fn shell(cmd: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let mut c = Command::new("cmd");
+        c.args(["/C", cmd]);
+        c
+    }
+    #[cfg(not(windows))]
+    {
+        let mut c = Command::new("sh");
+        c.args(["-c", cmd]);
+        c
     }
 }
 
 /// A process can have only one tracer. If something is already tracing us,
 /// strace on our children would fail and yield a wrong-but-plausible report.
+#[cfg(target_os = "linux")]
 fn being_traced() -> bool {
     std::fs::read_to_string("/proc/self/status")
         .map(|t| {
@@ -239,7 +290,15 @@ fn being_traced() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(not(target_os = "linux"))]
+fn being_traced() -> bool {
+    false
+}
+
 fn have_strace() -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
     Command::new("strace")
         .arg("-V")
         .stdout(Stdio::null())
@@ -260,10 +319,16 @@ fn snapshot(root: &Path, ignore: &[String]) -> Snapshot {
 }
 
 fn walk(root: &Path, dir: &Path, ignore: &[String], out: &mut Snapshot) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in rd.flatten() {
         let path = entry.path();
-        let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
         if dir == root && ignore.iter().any(|i| i == &rel) {
             continue;
         }
@@ -303,8 +368,13 @@ fn fs_delta(before: &Snapshot, after: &Snapshot) -> FsDelta {
 // ---------- strace parsing (placeholder tracer) ----------
 
 fn parse_strace(path: &Path, root: &Path) -> SyscallSummary {
-    let mut s = SyscallSummary { available: true, ..Default::default() };
-    let Ok(text) = std::fs::read_to_string(path) else { return s };
+    let mut s = SyscallSummary {
+        available: true,
+        ..Default::default()
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return s;
+    };
     let root_s = root.to_string_lossy();
     // `PID  name(args) = ret` ; with -s 0 strings are elided but paths are kept.
     // Under -f, a call interrupted by another process's event is split into
@@ -323,7 +393,7 @@ fn parse_strace(path: &Path, root: &Path) -> SyscallSummary {
             continue;
         } else if let Some(c) = resumed_re.captures(line) {
             match pending.remove(&c[1]) {
-                Some((n, a)) if n == &c[2] => (n, a, c[3].to_string()),
+                Some((n, a)) if n == c[2] => (n, a, c[3].to_string()),
                 _ => continue,
             }
         } else {
@@ -367,4 +437,108 @@ fn parse_strace(path: &Path, root: &Path) -> SyscallSummary {
 
 fn rel(p: &str, root: &str) -> String {
     p.replace(root, "$ROOT")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn obs() -> Observation {
+        Observation {
+            exit: Some(0),
+            stdout: "out".into(),
+            stderr: String::new(),
+            fs: FsDelta::default(),
+            syscalls: SyscallSummary::default(),
+        }
+    }
+
+    #[test]
+    fn fingerprint_ignores_syscall_counts() {
+        let a = obs();
+        let mut b = obs();
+        b.syscalls.counts.insert("openat".into(), 42);
+        assert!(a.behaves_like(&b));
+    }
+
+    #[test]
+    fn fingerprint_tracks_boundary_changes() {
+        let a = obs();
+
+        let mut b = obs();
+        b.stdout = "different".into();
+        assert!(!a.behaves_like(&b));
+
+        let mut c = obs();
+        c.exit = Some(1);
+        assert!(!a.behaves_like(&c));
+
+        let mut d = obs();
+        d.syscalls.connects.insert("127.0.0.1:5432".into());
+        assert!(!a.behaves_like(&d));
+    }
+
+    #[test]
+    fn normalise_replaces_root_and_patterns() {
+        let res = vec![Regex::new(r"\d{4}-\d{2}-\d{2}").unwrap()];
+        let s = normalise_text("/work/repo/file at 2026-09-13", "/work/repo", &res);
+        assert_eq!(s, "$ROOT/file at <N>");
+    }
+
+    #[test]
+    fn fs_delta_reports_created_modified_deleted() {
+        let mut before = Snapshot::new();
+        before.insert("keep".into(), (1, 1));
+        before.insert("change".into(), (1, 2));
+        before.insert("gone".into(), (1, 3));
+        let mut after = Snapshot::new();
+        after.insert("keep".into(), (1, 1));
+        after.insert("change".into(), (2, 9));
+        after.insert("fresh".into(), (5, 5));
+
+        let d = fs_delta(&before, &after);
+        assert_eq!(d.created, vec!["fresh"]);
+        assert_eq!(d.modified, vec!["change"]);
+        assert_eq!(d.deleted, vec!["gone"]);
+    }
+
+    #[test]
+    fn strace_parse_writes_ignores_failures_pairs_resumed() {
+        let text = "\
+100  openat(AT_FDCWD, \"/r/out.txt\", O_WRONLY|O_CREAT) = 3
+100  openat(AT_FDCWD, \"/r/readonly\", O_RDONLY) = 4
+100  openat(AT_FDCWD, \"/r/missing\", O_WRONLY) = -1
+100  unlink(\"/r/tmp\") = 0
+101  connect(3, {sa_family=AF_INET} <unfinished ...>
+100  execve(\"/bin/tool\", []) = 0
+101  <... connect resumed>) = 0
+";
+        let f = std::env::temp_dir().join(format!("bdiff-test-strace-{}", std::process::id()));
+        std::fs::write(&f, text).unwrap();
+        let s = parse_strace(&f, Path::new("/r"));
+        let _ = std::fs::remove_file(&f);
+
+        assert!(s.available);
+        assert!(s.writes.contains("$ROOT/out.txt"));
+        assert!(s.writes.contains("$ROOT/tmp"));
+        assert!(!s.writes.iter().any(|w| w.contains("readonly")));
+        assert!(!s.writes.iter().any(|w| w.contains("missing")));
+        assert_eq!(s.connects.len(), 1);
+        assert!(s.execs.contains("/bin/tool"));
+        assert_eq!(s.counts["openat"], 3);
+    }
+
+    #[test]
+    fn snapshot_skips_ignored_top_level_entries() {
+        let root = std::env::temp_dir().join(format!("bdiff-test-snap-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("skipme")).unwrap();
+        std::fs::write(root.join("skipme/inner"), "x").unwrap();
+        std::fs::write(root.join("seen"), "y").unwrap();
+
+        let snap = snapshot(&root, &["skipme".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(snap.contains_key("seen"));
+        assert!(!snap.keys().any(|k| k.contains("inner")));
+    }
 }
