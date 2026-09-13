@@ -35,7 +35,11 @@ pub struct Run {
 
 impl Default for Run {
     fn default() -> Self {
-        Run { cmd: None, cwd: dot(), repeats: two() }
+        Run {
+            cmd: None,
+            cwd: dot(),
+            repeats: two(),
+        }
     }
 }
 
@@ -73,7 +77,10 @@ pub struct Fs {
 
 impl Default for Fs {
     fn default() -> Self {
-        Fs { ignore: default_ignore(), mode: auto() }
+        Fs {
+            ignore: default_ignore(),
+            mode: auto(),
+        }
     }
 }
 
@@ -91,13 +98,18 @@ fn auto() -> String {
 }
 
 fn default_ignore() -> Vec<String> {
-    vec![".git".into(), "target".into(), "node_modules".into(), "__pycache__".into()]
+    vec![
+        ".git".into(),
+        "target".into(),
+        "node_modules".into(),
+        "__pycache__".into(),
+    ]
 }
 
 impl Config {
     pub fn load(path: &Path) -> Result<Config, String> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
         Self::from_toml(&text).map_err(|e| format!("parse {}: {e}", path.display()))
     }
 

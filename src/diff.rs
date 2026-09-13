@@ -14,7 +14,10 @@ pub enum Label {
 
 impl Label {
     pub fn is_change(self) -> bool {
-        matches!(self, Label::NewBehavior | Label::RegressionCandidate | Label::Changed)
+        matches!(
+            self,
+            Label::NewBehavior | Label::RegressionCandidate | Label::Changed
+        )
     }
 }
 
@@ -45,7 +48,11 @@ pub struct DiffLine {
 }
 
 pub fn compare(inp: &Inputs, old: &Observation, new: &Observation) -> Finding {
-    let ok = |o: &Observation| o.exit.map(|c| inp.expect_exit.contains(&c)).unwrap_or(false);
+    let ok = |o: &Observation| {
+        o.exit
+            .map(|c| inp.expect_exit.contains(&c))
+            .unwrap_or(false)
+    };
     let old_ok = ok(old);
     let new_ok = ok(new);
     // Behavioral equality: what crosses the boundary. Syscall *counts* are
@@ -130,9 +137,21 @@ pub fn compare(inp: &Inputs, old: &Observation, new: &Observation) -> Finding {
         case: inp.case.to_string(),
         label,
         fingerprint,
-        exit: if old.exit != new.exit { Some((old.exit, new.exit)) } else { None },
-        stdout: if old.stdout != new.stdout { line_diff(&old.stdout, &new.stdout) } else { vec![] },
-        stderr: if old.stderr != new.stderr { line_diff(&old.stderr, &new.stderr) } else { vec![] },
+        exit: if old.exit != new.exit {
+            Some((old.exit, new.exit))
+        } else {
+            None
+        },
+        stdout: if old.stdout != new.stdout {
+            line_diff(&old.stdout, &new.stdout)
+        } else {
+            vec![]
+        },
+        stderr: if old.stderr != new.stderr {
+            line_diff(&old.stderr, &new.stderr)
+        } else {
+            vec![]
+        },
         fs,
         syscalls,
     }
@@ -145,8 +164,17 @@ pub fn line_diff(a: &str, b: &str) -> Vec<DiffLine> {
     let (n, m) = (a.len(), b.len());
     if n * m > 4_000_000 {
         // too big for quadratic LCS; fall back to whole replacement
-        let mut v: Vec<DiffLine> = a.iter().map(|l| DiffLine { op: '-', text: l.to_string() }).collect();
-        v.extend(b.iter().map(|l| DiffLine { op: '+', text: l.to_string() }));
+        let mut v: Vec<DiffLine> = a
+            .iter()
+            .map(|l| DiffLine {
+                op: '-',
+                text: l.to_string(),
+            })
+            .collect();
+        v.extend(b.iter().map(|l| DiffLine {
+            op: '+',
+            text: l.to_string(),
+        }));
         return v;
     }
     let mut dp = vec![vec![0u32; m + 1]; n + 1];
@@ -163,23 +191,38 @@ pub fn line_diff(a: &str, b: &str) -> Vec<DiffLine> {
     let (mut i, mut j) = (0, 0);
     while i < n && j < m {
         if a[i] == b[j] {
-            full.push(DiffLine { op: ' ', text: a[i].to_string() });
+            full.push(DiffLine {
+                op: ' ',
+                text: a[i].to_string(),
+            });
             i += 1;
             j += 1;
         } else if dp[i + 1][j] >= dp[i][j + 1] {
-            full.push(DiffLine { op: '-', text: a[i].to_string() });
+            full.push(DiffLine {
+                op: '-',
+                text: a[i].to_string(),
+            });
             i += 1;
         } else {
-            full.push(DiffLine { op: '+', text: b[j].to_string() });
+            full.push(DiffLine {
+                op: '+',
+                text: b[j].to_string(),
+            });
             j += 1;
         }
     }
     while i < n {
-        full.push(DiffLine { op: '-', text: a[i].to_string() });
+        full.push(DiffLine {
+            op: '-',
+            text: a[i].to_string(),
+        });
         i += 1;
     }
     while j < m {
-        full.push(DiffLine { op: '+', text: b[j].to_string() });
+        full.push(DiffLine {
+            op: '+',
+            text: b[j].to_string(),
+        });
         j += 1;
     }
     // keep changed lines plus 1 line of context each side
@@ -190,7 +233,11 @@ pub fn line_diff(a: &str, b: &str) -> Vec<DiffLine> {
             (lo..=hi).any(|x| full[x].op != ' ')
         })
         .collect();
-    full.into_iter().zip(keep).filter(|(_, k)| *k).map(|(l, _)| l).collect()
+    full.into_iter()
+        .zip(keep)
+        .filter(|(_, k)| *k)
+        .map(|(l, _)| l)
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -283,7 +330,13 @@ mod tests {
     }
 
     fn inputs<'a>(expect_exit: &'a [i32], accepted: Option<&'a str>) -> Inputs<'a> {
-        Inputs { case: "t", expect_exit, accepted, old_flaky: false, new_flaky: false }
+        Inputs {
+            case: "t",
+            expect_exit,
+            accepted,
+            old_flaky: false,
+            new_flaky: false,
+        }
     }
 
     #[test]
@@ -343,7 +396,10 @@ mod tests {
     fn finding_reports_exit_and_fs_deltas() {
         let old = obs(0, "x");
         let mut new = obs(3, "x");
-        new.fs = FsDelta { created: vec!["f".into()], ..FsDelta::default() };
+        new.fs = FsDelta {
+            created: vec!["f".into()],
+            ..FsDelta::default()
+        };
         let f = compare(&inputs(&[0], None), &old, &new);
         assert_eq!(f.exit, Some((Some(0), Some(3))));
         assert_eq!(f.fs, vec!["+ created f"]);
@@ -353,7 +409,10 @@ mod tests {
     fn line_diff_keeps_changes_with_one_line_context() {
         let d = line_diff("1\n2\n3\n4\n5", "1\n2\nX\n4\n5");
         let rendered: Vec<(char, &str)> = d.iter().map(|l| (l.op, l.text.as_str())).collect();
-        assert_eq!(rendered, vec![(' ', "2"), ('-', "3"), ('+', "X"), (' ', "4")]);
+        assert_eq!(
+            rendered,
+            vec![(' ', "2"), ('-', "3"), ('+', "X"), (' ', "4")]
+        );
     }
 
     #[test]

@@ -84,21 +84,32 @@ impl Runner {
         } else {
             trace
         };
-        Ok(Runner { root, cfg, normalisers, trace, reset: None })
+        Ok(Runner {
+            root,
+            cfg,
+            normalisers,
+            trace,
+            reset: None,
+        })
     }
 
     fn reset_tree(&self) -> Result<(), String> {
-        let Some(Reset::Git) = &self.reset else { return Ok(()) };
+        let Some(Reset::Git) = &self.reset else {
+            return Ok(());
+        };
         let mut clean = Command::new("git");
         clean.args(["clean", "-fdxq"]);
         for i in &self.cfg.fs.ignore {
             clean.arg("-e").arg(i);
         }
-        for (name, mut cmd) in [("clean", clean), ("checkout", {
-            let mut c = Command::new("git");
-            c.args(["checkout", "-q", "--", "."]);
-            c
-        })] {
+        for (name, mut cmd) in [
+            ("clean", clean),
+            ("checkout", {
+                let mut c = Command::new("git");
+                c.args(["checkout", "-q", "--", "."]);
+                c
+            }),
+        ] {
             let st = cmd
                 .current_dir(&self.root)
                 .stdout(Stdio::null())
@@ -113,7 +124,9 @@ impl Runner {
     }
 
     pub fn build(&self) -> Result<(), String> {
-        let Some(cmd) = &self.cfg.build.cmd else { return Ok(()) };
+        let Some(cmd) = &self.cfg.build.cmd else {
+            return Ok(());
+        };
         eprintln!("  build: {cmd}");
         let st = shell(cmd)
             .current_dir(&self.root)
@@ -151,14 +164,26 @@ impl Runner {
             "trace" => false,
             _ => trace_file.is_none(),
         };
-        let before = if walk { Some(snapshot(&self.root, &self.cfg.fs.ignore)) } else { None };
+        let before = if walk {
+            Some(snapshot(&self.root, &self.cfg.fs.ignore))
+        } else {
+            None
+        };
 
         let mut command = if let Some(tf) = &trace_file {
             let mut c = Command::new("strace");
-            c.args(["-f", "-qq", "-e", "trace=%file,%network,%process", "-s", "0", "-o"])
-                .arg(tf)
-                .arg("--")
-                .args(&argv);
+            c.args([
+                "-f",
+                "-qq",
+                "-e",
+                "trace=%file,%network,%process",
+                "-s",
+                "0",
+                "-o",
+            ])
+            .arg(tf)
+            .arg("--")
+            .args(&argv);
             c
         } else {
             let mut c = Command::new(&argv[0]);
@@ -201,7 +226,14 @@ impl Runner {
                 .iter()
                 .filter(|w| w.starts_with("$ROOT/"))
                 .map(|w| w["$ROOT/".len()..].to_string())
-                .filter(|w| !self.cfg.fs.ignore.iter().any(|i| w == i || w.starts_with(&format!("{i}/"))))
+                .filter(|w| {
+                    !self
+                        .cfg
+                        .fs
+                        .ignore
+                        .iter()
+                        .any(|i| w == i || w.starts_with(&format!("{i}/")))
+                })
                 .collect();
         }
 
@@ -287,10 +319,16 @@ fn snapshot(root: &Path, ignore: &[String]) -> Snapshot {
 }
 
 fn walk(root: &Path, dir: &Path, ignore: &[String], out: &mut Snapshot) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in rd.flatten() {
         let path = entry.path();
-        let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
         if dir == root && ignore.iter().any(|i| i == &rel) {
             continue;
         }
@@ -330,8 +368,13 @@ fn fs_delta(before: &Snapshot, after: &Snapshot) -> FsDelta {
 // ---------- strace parsing (placeholder tracer) ----------
 
 fn parse_strace(path: &Path, root: &Path) -> SyscallSummary {
-    let mut s = SyscallSummary { available: true, ..Default::default() };
-    let Ok(text) = std::fs::read_to_string(path) else { return s };
+    let mut s = SyscallSummary {
+        available: true,
+        ..Default::default()
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return s;
+    };
     let root_s = root.to_string_lossy();
     // `PID  name(args) = ret` ; with -s 0 strings are elided but paths are kept.
     // Under -f, a call interrupted by another process's event is split into
@@ -350,7 +393,7 @@ fn parse_strace(path: &Path, root: &Path) -> SyscallSummary {
             continue;
         } else if let Some(c) = resumed_re.captures(line) {
             match pending.remove(&c[1]) {
-                Some((n, a)) if n == &c[2] => (n, a, c[3].to_string()),
+                Some((n, a)) if n == c[2] => (n, a, c[3].to_string()),
                 _ => continue,
             }
         } else {
