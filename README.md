@@ -36,6 +36,7 @@ invocation to run against both revisions:
     [run]
     cmd = "target/debug/app"        # program to run; case args are appended
     repeats = 2                     # runs per case; >1 detects flakiness
+    reset = "auto"                  # tree reset per run: auto | git | copy | none
 
     [[case]]
     name = "help text"
@@ -61,10 +62,15 @@ Accepted deltas are still reported but no longer fail the run. CI runs
 `bdiff rev HEAD~1 HEAD` on every push, so a change to bdiff's own behavior
 must be accepted before it can land.
 
+The reset keeps repeats and cases from seeing each other's side effects:
+`auto` uses git in rev mode and nothing in dirs mode, `git` runs
+`git clean` plus `git checkout`, `copy` restores the tree from a pristine
+copy taken before the first run (works anywhere), `none` disables it.
+
 ## Known v0 limits
 
 - strace is a placeholder tracer; when bdiff itself runs under a tracer,
   syscall tracing auto-degrades to off (nested ptrace is unsupported).
-- Tree reset between runs uses git and only works in rev mode; dirs mode can
-  leak state between repeats.
-- Linux only.
+- Syscall tracing is Linux only. On Windows and macOS bdiff still runs:
+  filesystem changes are detected by walking the tree before and after each
+  case instead of from the trace.
