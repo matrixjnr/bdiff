@@ -35,8 +35,7 @@ struct Opts {
     only: Vec<String>,
 }
 
-fn parse_args() -> Result<Opts, String> {
-    let mut args = std::env::args().skip(1);
+fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Opts, String> {
     let mode = args.next().ok_or(USAGE)?;
     if mode == "-h" || mode == "--help" {
         return Err(USAGE.into());
@@ -90,7 +89,7 @@ fn main() {
 }
 
 fn real_main() -> Result<bool, String> {
-    let o = parse_args()?;
+    let o = parse_args(std::env::args().skip(1))?;
     if o.mode == "accept" {
         return accept(&o).map(|_| false);
     }
@@ -232,7 +231,19 @@ fn write_json<T: serde::Serialize>(p: &Path, v: &T) -> Result<(), String> {
 }
 
 fn abs(p: &str) -> Result<PathBuf, String> {
-    std::fs::canonicalize(p).map_err(|e| format!("{p}: {e}"))
+    std::fs::canonicalize(p)
+        .map(strip_verbatim)
+        .map_err(|e| format!("{p}: {e}"))
+}
+
+/// Windows canonicalize returns verbatim paths (\\?\C:\...). Children print
+/// plain paths, so keep the plain form or $ROOT normalisation never matches.
+fn strip_verbatim(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
+        _ => p,
+    }
 }
 
 fn worktree(repo: &Path, rev: &str) -> Result<PathBuf, String> {
@@ -252,4 +263,53 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
         return Err(format!("git {:?}: {}", args, String::from_utf8_lossy(&out.stderr)));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Opts, String> {
+        parse_args(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn parses_modes_and_flags() {
+        let o = parse(&["rev", "HEAD~1", "HEAD", "--json", "--repeats", "3"]).unwrap();
+        assert_eq!(o.mode, "rev");
+        assert_eq!((o.a.as_str(), o.b.as_str()), ("HEAD~1", "HEAD"));
+        assert!(o.json);
+        assert!(o.trace);
+        assert_eq!(o.repeats, Some(3));
+
+        let o = parse(&["dirs", "a", "b", "--no-trace"]).unwrap();
+        assert!(!o.trace);
+        assert!(!o.json);
+    }
+
+    #[test]
+    fn accept_takes_case_filters() {
+        let o = parse(&["accept", "--case", "x", "--case", "y"]).unwrap();
+        assert_eq!(o.mode, "accept");
+        assert_eq!(o.only, vec!["x", "y"]);
+    }
+
+    #[test]
+    fn rejects_bad_input() {
+        assert!(parse(&[]).is_err());
+        assert!(parse(&["rev", "only-one"]).is_err());
+        assert!(parse(&["dirs", "a", "b", "--wat"]).is_err());
+        assert!(parse(&["dirs", "a", "b", "--repeats", "many"]).is_err());
+        assert!(parse(&["--help"]).is_err());
+    }
+
+    #[test]
+    fn strips_windows_verbatim_prefix() {
+        assert_eq!(strip_verbatim(PathBuf::from(r"\\?\C:\repo")), PathBuf::from(r"C:\repo"));
+        assert_eq!(
+            strip_verbatim(PathBuf::from(r"\\?\UNC\srv\share")),
+            PathBuf::from(r"\\?\UNC\srv\share")
+        );
+        assert_eq!(strip_verbatim(PathBuf::from("/plain/unix")), PathBuf::from("/plain/unix"));
+    }
 }

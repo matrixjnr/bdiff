@@ -115,9 +115,7 @@ impl Runner {
     pub fn build(&self) -> Result<(), String> {
         let Some(cmd) = &self.cfg.build.cmd else { return Ok(()) };
         eprintln!("  build: {cmd}");
-        let st = Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
+        let st = shell(cmd)
             .current_dir(&self.root)
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -217,17 +215,38 @@ impl Runner {
     }
 
     fn normalise(&self, s: &str) -> String {
-        let root = self.root.to_string_lossy();
-        let mut s = s.replace(root.as_ref(), "$ROOT");
-        for re in &self.normalisers {
-            s = re.replace_all(&s, "<N>").into_owned();
-        }
-        s
+        normalise_text(s, &self.root.to_string_lossy(), &self.normalisers)
+    }
+}
+
+/// Replace the revision root with $ROOT, then apply configured patterns.
+fn normalise_text(s: &str, root: &str, patterns: &[Regex]) -> String {
+    let mut s = s.replace(root, "$ROOT");
+    for re in patterns {
+        s = re.replace_all(&s, "<N>").into_owned();
+    }
+    s
+}
+
+/// Run a config-supplied command line through the platform shell.
+fn shell(cmd: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let mut c = Command::new("cmd");
+        c.args(["/C", cmd]);
+        c
+    }
+    #[cfg(not(windows))]
+    {
+        let mut c = Command::new("sh");
+        c.args(["-c", cmd]);
+        c
     }
 }
 
 /// A process can have only one tracer. If something is already tracing us,
 /// strace on our children would fail and yield a wrong-but-plausible report.
+#[cfg(target_os = "linux")]
 fn being_traced() -> bool {
     std::fs::read_to_string("/proc/self/status")
         .map(|t| {
@@ -239,7 +258,15 @@ fn being_traced() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(not(target_os = "linux"))]
+fn being_traced() -> bool {
+    false
+}
+
 fn have_strace() -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
     Command::new("strace")
         .arg("-V")
         .stdout(Stdio::null())
@@ -367,4 +394,108 @@ fn parse_strace(path: &Path, root: &Path) -> SyscallSummary {
 
 fn rel(p: &str, root: &str) -> String {
     p.replace(root, "$ROOT")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn obs() -> Observation {
+        Observation {
+            exit: Some(0),
+            stdout: "out".into(),
+            stderr: String::new(),
+            fs: FsDelta::default(),
+            syscalls: SyscallSummary::default(),
+        }
+    }
+
+    #[test]
+    fn fingerprint_ignores_syscall_counts() {
+        let a = obs();
+        let mut b = obs();
+        b.syscalls.counts.insert("openat".into(), 42);
+        assert!(a.behaves_like(&b));
+    }
+
+    #[test]
+    fn fingerprint_tracks_boundary_changes() {
+        let a = obs();
+
+        let mut b = obs();
+        b.stdout = "different".into();
+        assert!(!a.behaves_like(&b));
+
+        let mut c = obs();
+        c.exit = Some(1);
+        assert!(!a.behaves_like(&c));
+
+        let mut d = obs();
+        d.syscalls.connects.insert("127.0.0.1:5432".into());
+        assert!(!a.behaves_like(&d));
+    }
+
+    #[test]
+    fn normalise_replaces_root_and_patterns() {
+        let res = vec![Regex::new(r"\d{4}-\d{2}-\d{2}").unwrap()];
+        let s = normalise_text("/work/repo/file at 2026-09-13", "/work/repo", &res);
+        assert_eq!(s, "$ROOT/file at <N>");
+    }
+
+    #[test]
+    fn fs_delta_reports_created_modified_deleted() {
+        let mut before = Snapshot::new();
+        before.insert("keep".into(), (1, 1));
+        before.insert("change".into(), (1, 2));
+        before.insert("gone".into(), (1, 3));
+        let mut after = Snapshot::new();
+        after.insert("keep".into(), (1, 1));
+        after.insert("change".into(), (2, 9));
+        after.insert("fresh".into(), (5, 5));
+
+        let d = fs_delta(&before, &after);
+        assert_eq!(d.created, vec!["fresh"]);
+        assert_eq!(d.modified, vec!["change"]);
+        assert_eq!(d.deleted, vec!["gone"]);
+    }
+
+    #[test]
+    fn strace_parse_writes_ignores_failures_pairs_resumed() {
+        let text = "\
+100  openat(AT_FDCWD, \"/r/out.txt\", O_WRONLY|O_CREAT) = 3
+100  openat(AT_FDCWD, \"/r/readonly\", O_RDONLY) = 4
+100  openat(AT_FDCWD, \"/r/missing\", O_WRONLY) = -1
+100  unlink(\"/r/tmp\") = 0
+101  connect(3, {sa_family=AF_INET} <unfinished ...>
+100  execve(\"/bin/tool\", []) = 0
+101  <... connect resumed>) = 0
+";
+        let f = std::env::temp_dir().join(format!("bdiff-test-strace-{}", std::process::id()));
+        std::fs::write(&f, text).unwrap();
+        let s = parse_strace(&f, Path::new("/r"));
+        let _ = std::fs::remove_file(&f);
+
+        assert!(s.available);
+        assert!(s.writes.contains("$ROOT/out.txt"));
+        assert!(s.writes.contains("$ROOT/tmp"));
+        assert!(!s.writes.iter().any(|w| w.contains("readonly")));
+        assert!(!s.writes.iter().any(|w| w.contains("missing")));
+        assert_eq!(s.connects.len(), 1);
+        assert!(s.execs.contains("/bin/tool"));
+        assert_eq!(s.counts["openat"], 3);
+    }
+
+    #[test]
+    fn snapshot_skips_ignored_top_level_entries() {
+        let root = std::env::temp_dir().join(format!("bdiff-test-snap-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("skipme")).unwrap();
+        std::fs::write(root.join("skipme/inner"), "x").unwrap();
+        std::fs::write(root.join("seen"), "y").unwrap();
+
+        let snap = snapshot(&root, &["skipme".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(snap.contains_key("seen"));
+        assert!(!snap.keys().any(|k| k.contains("inner")));
+    }
 }

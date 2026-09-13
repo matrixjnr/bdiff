@@ -98,6 +98,61 @@ impl Config {
     pub fn load(path: &Path) -> Result<Config, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("read {}: {e}", path.display()))?;
-        toml::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))
+        Self::from_toml(&text).map_err(|e| format!("parse {}: {e}", path.display()))
+    }
+
+    pub fn from_toml(text: &str) -> Result<Config, String> {
+        toml::from_str(text).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults() {
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.run.repeats, 2);
+        assert_eq!(c.run.cwd, ".");
+        assert_eq!(c.fs.mode, "auto");
+        assert!(c.fs.ignore.contains(&".git".to_string()));
+        assert!(c.cases.is_empty());
+        assert!(c.build.cmd.is_none());
+    }
+
+    #[test]
+    fn case_defaults_and_overrides() {
+        let c = Config::from_toml(
+            r#"
+            [run]
+            cmd = "app"
+            repeats = 3
+
+            [[case]]
+            name = "a"
+
+            [[case]]
+            name = "b"
+            args = ["-x"]
+            stdin = "in"
+            cmd = "other"
+            expect_exit = [0, 1]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.run.repeats, 3);
+        assert_eq!(c.cases.len(), 2);
+        assert_eq!(c.cases[0].expect_exit, vec![0]);
+        assert!(c.cases[0].cmd.is_none());
+        assert_eq!(c.cases[1].expect_exit, vec![0, 1]);
+        assert_eq!(c.cases[1].cmd.as_deref(), Some("other"));
+        assert_eq!(c.cases[1].args, vec!["-x"]);
+        assert_eq!(c.cases[1].stdin, "in");
+    }
+
+    #[test]
+    fn rejects_bad_toml() {
+        assert!(Config::from_toml("[run\n").is_err());
     }
 }

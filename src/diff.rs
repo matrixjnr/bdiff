@@ -266,3 +266,102 @@ impl Report {
 fn fmt_exit(e: Option<i32>) -> String {
     e.map(|c| c.to_string()).unwrap_or_else(|| "signal".into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exec::{FsDelta, Observation, SyscallSummary};
+
+    fn obs(exit: i32, stdout: &str) -> Observation {
+        Observation {
+            exit: Some(exit),
+            stdout: stdout.into(),
+            stderr: String::new(),
+            fs: FsDelta::default(),
+            syscalls: SyscallSummary::default(),
+        }
+    }
+
+    fn inputs<'a>(expect_exit: &'a [i32], accepted: Option<&'a str>) -> Inputs<'a> {
+        Inputs { case: "t", expect_exit, accepted, old_flaky: false, new_flaky: false }
+    }
+
+    #[test]
+    fn label_unchanged() {
+        let f = compare(&inputs(&[0], None), &obs(0, "x"), &obs(0, "x"));
+        assert_eq!(f.label, Label::Unchanged);
+        assert!(f.stdout.is_empty());
+        assert!(f.exit.is_none());
+    }
+
+    #[test]
+    fn label_new_behavior_when_old_failed() {
+        let f = compare(&inputs(&[0], None), &obs(1, "err"), &obs(0, "ok"));
+        assert_eq!(f.label, Label::NewBehavior);
+    }
+
+    #[test]
+    fn label_regression_when_old_ok() {
+        let f = compare(&inputs(&[0], None), &obs(0, "a"), &obs(0, "b"));
+        assert_eq!(f.label, Label::RegressionCandidate);
+        let f = compare(&inputs(&[0], None), &obs(0, "a"), &obs(1, "boom"));
+        assert_eq!(f.label, Label::RegressionCandidate);
+    }
+
+    #[test]
+    fn label_changed_when_both_fail_differently() {
+        let f = compare(&inputs(&[0], None), &obs(1, "a"), &obs(2, "b"));
+        assert_eq!(f.label, Label::Changed);
+    }
+
+    #[test]
+    fn label_respects_expect_exit() {
+        // exit 1 counts as success for this case, so a 0 -> 1 flip with the
+        // same output rules is still just a candidate, not new behavior
+        let f = compare(&inputs(&[0, 1], None), &obs(1, "a"), &obs(0, "b"));
+        assert_eq!(f.label, Label::RegressionCandidate);
+    }
+
+    #[test]
+    fn label_accepted_by_fingerprint() {
+        let new = obs(0, "b");
+        let fp = new.fingerprint();
+        let f = compare(&inputs(&[0], Some(&fp)), &obs(0, "a"), &new);
+        assert_eq!(f.label, Label::Accepted);
+        assert!(f.label == Label::Accepted && !f.label.is_change());
+    }
+
+    #[test]
+    fn label_flaky_wins() {
+        let mut inp = inputs(&[0], None);
+        inp.new_flaky = true;
+        let f = compare(&inp, &obs(0, "a"), &obs(0, "b"));
+        assert_eq!(f.label, Label::Flaky);
+    }
+
+    #[test]
+    fn finding_reports_exit_and_fs_deltas() {
+        let old = obs(0, "x");
+        let mut new = obs(3, "x");
+        new.fs = FsDelta { created: vec!["f".into()], ..FsDelta::default() };
+        let f = compare(&inputs(&[0], None), &old, &new);
+        assert_eq!(f.exit, Some((Some(0), Some(3))));
+        assert_eq!(f.fs, vec!["+ created f"]);
+    }
+
+    #[test]
+    fn line_diff_keeps_changes_with_one_line_context() {
+        let d = line_diff("1\n2\n3\n4\n5", "1\n2\nX\n4\n5");
+        let rendered: Vec<(char, &str)> = d.iter().map(|l| (l.op, l.text.as_str())).collect();
+        assert_eq!(rendered, vec![(' ', "2"), ('-', "3"), ('+', "X"), (' ', "4")]);
+    }
+
+    #[test]
+    fn line_diff_pure_insert_and_delete() {
+        assert!(line_diff("", "").is_empty());
+        let d = line_diff("", "a");
+        assert_eq!((d[0].op, d[0].text.as_str()), ('+', "a"));
+        let d = line_diff("a", "");
+        assert_eq!((d[0].op, d[0].text.as_str()), ('-', "a"));
+    }
+}
