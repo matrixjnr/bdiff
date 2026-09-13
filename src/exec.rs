@@ -65,11 +65,22 @@ pub struct Runner {
     trace: bool,
     /// If set, restore the tree to this state before every case run so
     /// repeats and cases never see each other's side effects.
-    pub reset: Option<Reset>,
+    reset: Option<Reset>,
 }
 
 pub enum Reset {
+    /// git clean + checkout; requires the root to be a git worktree.
     Git,
+    /// Restore from a pristine copy taken when the reset was enabled.
+    Copy(PathBuf),
+}
+
+impl Drop for Runner {
+    fn drop(&mut self) {
+        if let Some(Reset::Copy(p)) = &self.reset {
+            let _ = std::fs::remove_dir_all(p);
+        }
+    }
 }
 
 impl Runner {
@@ -93,10 +104,37 @@ impl Runner {
         })
     }
 
+    /// Enable tree resets before every case run: "git" or "copy".
+    pub fn set_reset(&mut self, kind: &str) -> Result<(), String> {
+        match kind {
+            "git" => self.reset = Some(Reset::Git),
+            "copy" => {
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                let pristine = std::env::temp_dir()
+                    .join(format!("bdiff-pristine-{}-{stamp}", std::process::id()));
+                copy_tree(&self.root, &pristine, &self.cfg.fs.ignore)
+                    .map_err(|e| format!("pristine copy: {e}"))?;
+                self.reset = Some(Reset::Copy(pristine));
+            }
+            k => return Err(format!("unknown reset kind {k:?}")),
+        }
+        Ok(())
+    }
+
     fn reset_tree(&self) -> Result<(), String> {
-        let Some(Reset::Git) = &self.reset else {
-            return Ok(());
-        };
+        match &self.reset {
+            None => Ok(()),
+            Some(Reset::Git) => self.reset_git(),
+            Some(Reset::Copy(pristine)) => clear_tree(&self.root, &self.cfg.fs.ignore)
+                .and_then(|()| copy_tree(pristine, &self.root, &[]))
+                .map_err(|e| format!("copy reset: {e}")),
+        }
+    }
+
+    fn reset_git(&self) -> Result<(), String> {
         let mut clean = Command::new("git");
         clean.args(["clean", "-fdxq"]);
         for i in &self.cfg.fs.ignore {
@@ -306,6 +344,55 @@ fn have_strace() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+// ---------- tree copy / reset ----------
+
+/// Remove every top-level entry of `root` except the ignored ones.
+fn clear_tree(root: &Path, ignore: &[String]) -> Result<(), String> {
+    let rd = std::fs::read_dir(root).map_err(|e| format!("{}: {e}", root.display()))?;
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if ignore.iter().any(|i| i == &name) {
+            continue;
+        }
+        let p = entry.path();
+        let r = if p.is_dir() {
+            std::fs::remove_dir_all(&p)
+        } else {
+            std::fs::remove_file(&p)
+        };
+        r.map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+    Ok(())
+}
+
+/// Copy `src` into `dst`, skipping ignored entries at the top level only.
+fn copy_tree(src: &Path, dst: &Path, ignore_top: &[String]) -> Result<(), String> {
+    copy_dir(src, dst, Some(ignore_top))
+}
+
+fn copy_dir(src: &Path, dst: &Path, ignore_top: Option<&[String]>) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+    let rd = std::fs::read_dir(src).map_err(|e| format!("{}: {e}", src.display()))?;
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        if let Some(ig) = ignore_top {
+            let n = name.to_string_lossy();
+            if ig.iter().any(|i| i == n.as_ref()) {
+                continue;
+            }
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            copy_dir(&from, &to, None)?;
+        } else if meta.is_file() {
+            std::fs::copy(&from, &to).map_err(|e| format!("{}: {e}", from.display()))?;
+        }
+    }
+    Ok(())
 }
 
 // ---------- filesystem snapshots ----------
@@ -526,6 +613,48 @@ mod tests {
         assert_eq!(s.connects.len(), 1);
         assert!(s.execs.contains("/bin/tool"));
         assert_eq!(s.counts["openat"], 3);
+    }
+
+    #[test]
+    fn copy_reset_restores_tree_and_leaves_ignored_alone() {
+        let root = std::env::temp_dir().join(format!("bdiff-test-reset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.txt"), "one").unwrap();
+        std::fs::write(root.join("sub").join("b.txt"), "two").unwrap();
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join("target").join("build"), "junk").unwrap();
+
+        let mut r = Runner::new(root.clone(), Config::default(), false).unwrap();
+        r.set_reset("copy").unwrap();
+
+        std::fs::write(root.join("a.txt"), "changed").unwrap();
+        std::fs::write(root.join("extra.txt"), "leak").unwrap();
+        std::fs::remove_file(root.join("sub").join("b.txt")).unwrap();
+        std::fs::write(root.join("target").join("build"), "newer junk").unwrap();
+
+        r.reset_tree().unwrap();
+
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "one");
+        assert_eq!(
+            std::fs::read_to_string(root.join("sub").join("b.txt")).unwrap(),
+            "two"
+        );
+        assert!(!root.join("extra.txt").exists());
+        // "target" is in the default ignore list: neither copied nor cleared
+        assert_eq!(
+            std::fs::read_to_string(root.join("target").join("build")).unwrap(),
+            "newer junk"
+        );
+
+        drop(r);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn set_reset_rejects_unknown_kind() {
+        let mut r = Runner::new(std::env::temp_dir(), Config::default(), false).unwrap();
+        assert!(r.set_reset("wat").is_err());
     }
 
     #[test]

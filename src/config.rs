@@ -31,6 +31,10 @@ pub struct Run {
     /// Times each case is run per revision. >1 enables flakiness detection.
     #[serde(default = "two")]
     pub repeats: usize,
+    /// Tree reset before every case run: "auto" (git in rev mode, nothing in
+    /// dirs mode), "git", "copy" (restore from a pristine copy), or "none".
+    #[serde(default = "auto")]
+    pub reset: String,
 }
 
 impl Default for Run {
@@ -39,6 +43,7 @@ impl Default for Run {
             cmd: None,
             cwd: dot(),
             repeats: two(),
+            reset: auto(),
         }
     }
 }
@@ -127,6 +132,7 @@ mod tests {
         let c = Config::from_toml("").unwrap();
         assert_eq!(c.run.repeats, 2);
         assert_eq!(c.run.cwd, ".");
+        assert_eq!(c.run.reset, "auto");
         assert_eq!(c.fs.mode, "auto");
         assert!(c.fs.ignore.contains(&".git".to_string()));
         assert!(c.cases.is_empty());

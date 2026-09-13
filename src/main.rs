@@ -142,15 +142,23 @@ fn run(o: &Opts, old_root: &Path, new_root: &Path) -> Result<bool, String> {
 
     let mut old = Runner::new(old_root.to_path_buf(), cfg.clone(), o.trace)?;
     let mut new = Runner::new(new_root.to_path_buf(), cfg.clone(), o.trace)?;
-    if o.mode == "rev" {
-        old.reset = Some(exec::Reset::Git);
-        new.reset = Some(exec::Reset::Git);
-    }
+    let reset = match cfg.run.reset.as_str() {
+        "auto" => (o.mode == "rev").then_some("git"),
+        "none" => None,
+        r @ ("git" | "copy") => Some(r),
+        r => return Err(format!("unknown run.reset {r:?} (auto|git|copy|none)")),
+    };
 
     eprintln!("old: {}", old_root.display());
     old.build()?;
     eprintln!("new: {}", new_root.display());
     new.build()?;
+
+    // After build, so a copy reset snapshots the built tree, not the source.
+    if let Some(kind) = reset {
+        old.set_reset(kind)?;
+        new.set_reset(kind)?;
+    }
 
     // Accepted fingerprints travel with the code: read from the new revision.
     let accepted: BTreeMap<String, String> =
