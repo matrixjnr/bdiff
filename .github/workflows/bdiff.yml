@@ -41,6 +41,9 @@ jobs:
 
   self-diff:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,9 +56,60 @@ jobs:
         run: cargo build
 
       - name: bdiff on own change
+        id: bdiff
         run: |
-          if git rev-parse -q --verify HEAD~1 >/dev/null; then
-            target/debug/bdiff rev HEAD~1 HEAD
+          if ! git rev-parse -q --verify HEAD~1 >/dev/null; then
+            echo "first commit; nothing to diff against" | tee bdiff-report.txt
+            echo "exit=0" >> "$GITHUB_OUTPUT"
           else
-            echo "first commit; nothing to diff against"
+            set +e
+            target/debug/bdiff rev HEAD~1 HEAD | tee bdiff-report.txt
+            ec=${PIPESTATUS[0]}
+            set -e
+            echo "exit=$ec" >> "$GITHUB_OUTPUT"
           fi
+          {
+            echo "## bdiff behavioral report"
+            echo '```text'
+            cat bdiff-report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bdiff-report
+          path: bdiff-report.txt
+
+      - name: Sticky PR comment
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          marker='<!-- bdiff-report -->'
+          ec='${{ steps.bdiff.outputs.exit }}'
+          case "$ec" in
+            0) verdict="No behavior change detected." ;;
+            1) verdict="Behavioral changes found. If intended, run bdiff accept and commit .bdiff/accepted.json." ;;
+            *) verdict="bdiff could not complete (exit $ec); see the workflow log." ;;
+          esac
+          body="$marker
+          **bdiff** on $(git rev-parse --short HEAD): $verdict
+
+          \`\`\`text
+          $(cat bdiff-report.txt)
+          \`\`\`"
+          cid=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
+            --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n1)
+          if [ -n "$cid" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$cid" -f body="$body" >/dev/null
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -f body="$body" >/dev/null
+          fi
+
+      - name: Fail on unaccepted behavioral change
+        run: |
+          ec='${{ steps.bdiff.outputs.exit }}'
+          [ "$ec" = "0" ] || exit "$ec"
